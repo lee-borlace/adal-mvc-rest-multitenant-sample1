@@ -17,6 +17,7 @@ using System.Net;
 using System.Net.Http.Headers;
 using Newtonsoft.Json;
 using System.Text;
+using Microsoft.SharePoint.Client;
 
 namespace WebApplication1.Controllers
 {
@@ -28,6 +29,9 @@ namespace WebApplication1.Controllers
         private string appKey = ConfigurationManager.AppSettings["ida:ClientSecret"];
         private string aadInstance = ConfigurationManager.AppSettings["ida:AADInstance"];
         private string graphResourceID = "https://graph.windows.net";
+
+        private string SHAREPOINT_BASE_URL = "https://lee79.sharepoint.com";
+        private string TASKS_SITE_URL1 = "https://lee79.sharepoint.com/sites/dev/TestTeamSiteWithTasks";
 
         // GET: UserProfile
         public async Task<ActionResult> Index()
@@ -76,7 +80,17 @@ namespace WebApplication1.Controllers
 
                 ViewBag.OutlookTasks = sb.ToString();
 
-                ViewBag.SharePointTasks = string.Empty;
+                var sharePointTasks = await GetSharePointTasks();
+
+                sb.Clear();
+
+                foreach (var task in sharePointTasks)
+                {
+                    sb.Append(task.Title);
+                    sb.Append(",");
+                }
+
+                ViewBag.SharePointTasks = sb.ToString();
 
 
                 return View(user);
@@ -146,6 +160,22 @@ namespace WebApplication1.Controllers
         }
 
 
+        public string GetTokenForSharePoint()
+        {
+            string signedInUserID = ClaimsPrincipal.Current.FindFirst(ClaimTypes.NameIdentifier).Value;
+            string tenantID = ClaimsPrincipal.Current.FindFirst("http://schemas.microsoft.com/identity/claims/tenantid").Value;
+            string userObjectID = ClaimsPrincipal.Current.FindFirst("http://schemas.microsoft.com/identity/claims/objectidentifier").Value;
+
+            // get a token for the Graph without triggering any user interaction (from the cache, via multi-resource refresh token, etc)
+            ClientCredential clientcred = new ClientCredential(clientId, appKey);
+            // initialize AuthenticationContext with the token cache of the currently signed in user, as kept in the app's database
+            AuthenticationContext authenticationContext = new AuthenticationContext(aadInstance + tenantID, new ADALTokenCache(signedInUserID));
+
+            // TODO : Make the resource here dynamic as it will need to match the specifics of the tenant.
+            AuthenticationResult authenticationResult = authenticationContext.AcquireTokenSilent(SHAREPOINT_BASE_URL, clientcred, new UserIdentifier(userObjectID, UserIdentifierType.UniqueId));
+            return authenticationResult.AccessToken;
+        }
+
 
         public async Task<List<TaskBase>> GetPlannerTasks(string accessToken)
         {
@@ -213,6 +243,39 @@ namespace WebApplication1.Controllers
             }
         }
 
+
+        public async Task<List<TaskBase>> GetSharePointTasks()
+        {
+            var retVal = new List<TaskBase>();
+
+            using (var context = new ClientContext(TASKS_SITE_URL1))
+            {
+                context.ExecutingWebRequest += ctx_ExecutingWebRequest;
+
+                List tasksList = context.Web.Lists.GetByTitle("Tasks");
+                var listItems = tasksList.GetItems(CamlQuery.CreateAllItemsQuery());
+
+                context.Load(listItems);
+                context.ExecuteQuery();
+
+                foreach (ListItem item in listItems)
+                {
+                    retVal.Add(new TaskBase() { Title = item["Title"].ToString() });
+                }
+            }
+
+
+
+            return retVal;
+        }
+
+
+        async void ctx_ExecutingWebRequest(object sender, WebRequestEventArgs e)
+        {
+            var token = GetTokenForSharePoint();
+
+            e.WebRequestExecutor.RequestHeaders["Authorization"] = "Bearer " + token;
+        }
 
     }
 }
